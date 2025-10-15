@@ -96,6 +96,7 @@ async function exportStructure(sourceConfig, targetConfig, excludeTables, output
             '--routines',
             '--triggers',
             '--events',
+            '--complete-insert',
             config.database
         ];
 
@@ -217,6 +218,75 @@ async function exportStructure(sourceConfig, targetConfig, excludeTables, output
     });
 }
 
+// 使用 mysqldump 从 target 数据库导出指定表的数据
+async function exportTargetTablesData(targetConfig, tables, outputFile) {
+    return new Promise((resolve, reject) => {
+        if (!tables || tables.length === 0) {
+            resolve();
+            return;
+        }
+
+        const config = targetConfig;
+
+        const args = [
+            '-h', config.host,
+            '-P', config.port.toString(),
+            '-u', config.user,
+            '--single-transaction',
+            '--no-create-info',
+            '--complete-insert',
+            '--skip-triggers',
+            config.database,
+            ...tables
+        ];
+
+        // 使用环境变量传递密码
+        const env = { ...process.env };
+        if (config.password) {
+            env.MYSQL_PWD = config.password;
+        }
+
+        const dumpProcess = spawn('mysqldump', args, { env });
+        let output = '';
+        let errors = '';
+
+        dumpProcess.stdout.on('data', (data) => {
+            output += data.toString();
+        });
+
+        dumpProcess.stderr.on('data', (data) => {
+            errors += data.toString();
+        });
+
+        dumpProcess.on('close', async (code) => {
+            if (code !== 0) {
+                reject(new Error(`mysqldump 导出 target 数据失败: ${errors}`));
+                return;
+            }
+
+            try {
+                // 添加注释头
+                let targetDataSQL = '\n\n';
+                targetDataSQL += '-- ' + '='.repeat(58) + '\n';
+                targetDataSQL += '-- Data from target database for excluded tables\n';
+                targetDataSQL += '-- Exported using mysqldump with --complete-insert\n';
+                targetDataSQL += '-- ' + '='.repeat(58) + '\n\n';
+                targetDataSQL += output;
+
+                // 追加到输出文件
+                await fs.appendFile(outputFile, targetDataSQL, 'utf8');
+                resolve();
+            } catch (error) {
+                reject(error);
+            }
+        });
+
+        dumpProcess.on('error', (error) => {
+            reject(new Error(`执行 mysqldump 失败: ${error.message}`));
+        });
+    });
+}
+
 // 从 source 和 target 数据库导出表数据（匹配列）
 async function exportTableDataWithReplace(targetConfig, sourceConfig, tableName) {
     try {
@@ -284,7 +354,7 @@ async function exportTableDataWithReplace(targetConfig, sourceConfig, tableName)
                 return `-- Table ${tableName} is empty in target database\n\n`;
             }
 
-            // 生成 REPLACE INTO 语句
+            // 生成 INSERT INTO 语句
             let result = '';
             result += `--\n-- Dumping data for table \`${tableName}\` from target database\n--\n`;
             result += `-- Common columns: ${columnNames.length} (Source: ${sourceColumnNames.length}, Target: ${targetColumnNames.length})\n`;
@@ -317,7 +387,7 @@ async function exportTableDataWithReplace(targetConfig, sourceConfig, tableName)
                     return `(${rowValues.join(',')})`;
                 }).join(',\n');
 
-                result += `REPLACE INTO \`${tableName}\` (${escapedColumnNames}) VALUES\n${values};\n\n`;
+                result += `INSERT INTO \`${tableName}\` (${escapedColumnNames}) VALUES\n${values};\n\n`;
             }
 
             return result;
@@ -375,44 +445,56 @@ async function mergeExports(config) {
         targetConn = await createConnection(target);
         console.log(`   ✓ 连接成功`);
 
-        // 步骤 3: 验证排除的表在 target 数据库中存在
-        console.log(`\n[3/4] 验证 target 数据库中的表...`);
+        // 步骤 3: 验证并过滤排除的表（只保留两个数据库都存在的表）
+        console.log(`\n[3/4] 验证并过滤 excludeTables...`);
+
+        // 连接 source 数据库
+        sourceConn = await createConnection(source);
+
+        const validTables = [];
+        const sourceOnlyTables = [];
+        const targetOnlyTables = [];
+
         for (const table of excludeTables) {
-            const [rows] = await targetConn.query(
+            // 检查表在 target 中是否存在
+            const [targetRows] = await targetConn.query(
                 'SELECT COUNT(*) as count FROM information_schema.tables WHERE table_schema = ? AND table_name = ?',
                 [target.database, table]
             );
 
-            if (rows[0].count === 0) {
-                console.log(`   ⚠ 警告: 表 ${table} 在 target 数据库中不存在`);
-            } else {
+            // 检查表在 source 中是否存在
+            const [sourceRows] = await sourceConn.query(
+                'SELECT COUNT(*) as count FROM information_schema.tables WHERE table_schema = ? AND table_name = ?',
+                [source.database, table]
+            );
+
+            const existsInTarget = targetRows[0].count > 0;
+            const existsInSource = sourceRows[0].count > 0;
+
+            if (existsInTarget && existsInSource) {
                 const [countRows] = await targetConn.query(`SELECT COUNT(*) as count FROM ${mysql.escapeId(table)}`);
-                console.log(`   ✓ 表 ${table} 存在 (${countRows[0].count} 行)`);
+                console.log(`   ✓ 表 ${table} 在两个数据库都存在 (${countRows[0].count} 行)`);
+                validTables.push(table);
+            } else if (!existsInTarget) {
+                console.log(`   ⚠ 跳过表 ${table}: target 中不存在`);
+                targetOnlyTables.push(table);
+            } else if (!existsInSource) {
+                console.log(`   ⚠ 跳过表 ${table}: source 中不存在 (无法导入)`);
+                sourceOnlyTables.push(table);
             }
         }
 
-        // 步骤 4: 从 target 数据库导出排除表的数据（使用 REPLACE INTO 去重）
-        console.log(`\n[4/4] 从 target 数据库导出排除表的数据...`);
-
-        let targetDataSQL = '\n\n';
-        targetDataSQL += '-- ' + '='.repeat(58) + '\n';
-        targetDataSQL += '-- Data from target database for excluded tables\n';
-        targetDataSQL += '-- Using REPLACE INTO to handle duplicates\n';
-        targetDataSQL += '-- ' + '='.repeat(58) + '\n\n';
-
-        for (const table of excludeTables) {
-            console.log(`   处理表: ${table}...`);
-
-            // 先清空表数据，然后使用 REPLACE INTO 导入
-            targetDataSQL += `-- Clear and replace data for table ${table}\n`;
-            targetDataSQL += `DELETE FROM \`${table}\`;\n\n`;
-
-            const tableData = await exportTableDataWithReplace(target, source, table);
-            targetDataSQL += tableData;
+        if (validTables.length === 0) {
+            console.log(`   ⚠ 没有需要从 target 导出的表`);
         }
 
-        // 追加到输出文件
-        await fs.appendFile(outputFile, targetDataSQL, 'utf8');
+        // 更新 excludeTables 为只包含有效的表
+        excludeTables = validTables;
+
+        // 步骤 4: 从 target 数据库导出排除表的数据
+        console.log(`\n[4/4] 从 target 数据库导出排除表的数据...`);
+
+        await exportTargetTablesData(target, excludeTables, outputFile);
         console.log(`   ✓ 数据追加完成`);
 
         // 显示文件信息
