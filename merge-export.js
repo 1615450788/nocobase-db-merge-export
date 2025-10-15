@@ -99,9 +99,10 @@ async function exportStructure(sourceConfig, targetConfig, excludeTables, output
             config.database
         ];
 
-        // 添加密码参数
+        // 使用环境变量传递密码（避免命令行参数中的特殊字符问题）
+        const env = { ...process.env };
         if (config.password) {
-            args.splice(5, 0, `-p${config.password}`);
+            env.MYSQL_PWD = config.password;
         }
 
         // 排除指定表的数据（但保留结构）
@@ -117,8 +118,8 @@ async function exportStructure(sourceConfig, targetConfig, excludeTables, output
             });
 
             // 先导出结构
-            const dumpStructure = spawn('mysqldump', structArgs);
-            const dumpData = spawn('mysqldump', dataArgs);
+            const dumpStructure = spawn('mysqldump', structArgs, { env });
+            const dumpData = spawn('mysqldump', dataArgs, { env });
 
             let structureOutput = '';
             let dataOutput = '';
@@ -177,7 +178,7 @@ async function exportStructure(sourceConfig, targetConfig, excludeTables, output
             });
         } else {
             // 没有排除表，直接导出全部
-            const dumpProcess = spawn('mysqldump', args);
+            const dumpProcess = spawn('mysqldump', args, { env });
             let output = '';
             let errors = '';
 
