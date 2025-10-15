@@ -404,7 +404,7 @@ Issues and Pull Requests are welcome!
 
 ### Development
 ```bash
-git clone https://github.com/your-repo/nocobase-db-merge-export.git
+git clone https://github.com/1615450788/nocobase-db-merge-export.git
 cd nocobase-db-merge-export
 npm install
 npm link  # Local testing
