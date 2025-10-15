@@ -1,0 +1,31 @@
+{
+  "name": "nocobase-db-merge-export",
+  "version": "1.0.0",
+  "description": "NocoBase database merge export tool for version upgrades - exports structure and merges data from two databases. NocoBase数据库导出合并工具，用于版本升级时导出结构并合并数据",
+  "main": "merge-export.js",
+  "bin": {
+    "dbm": "./bin/dbm.js"
+  },
+  "scripts": {
+    "export": "node merge-export.js",
+    "test": "node merge-export.js config.json"
+  },
+  "keywords": [
+    "mysql",
+    "mariadb",
+    "database",
+    "export",
+    "nocobase",
+    "migration",
+    "cli"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "inquirer": "^8.2.6",
+    "mysql2": "^3.11.5"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}

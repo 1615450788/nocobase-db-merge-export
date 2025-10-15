@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node:*)",
+      "Bash(mysqldump:*)",
+      "Bash(npm install)",
+      "Bash(npm link:*)",
+      "Bash(dbm:*)",
+      "Read(//c/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
