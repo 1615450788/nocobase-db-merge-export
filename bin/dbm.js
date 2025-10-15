@@ -27,24 +27,24 @@ const PRESET_TABLES = {
     ]
 };
 
-// 从 Target 数据库获取业务数据表（从 collections 表）
-async function getBusinessTables(targetConfig) {
+// 从 Source 数据库获取业务数据表（从 collections 表）
+async function getBusinessTables(sourceConfig) {
     let connection;
     try {
-        console.log('\n🔍 正在连接 Target 数据库获取业务表列表...');
+        console.log('\n🔍 正在连接 Source 数据库获取业务表列表...');
 
         connection = await mysql.createConnection({
-            host: targetConfig.host,
-            port: targetConfig.port,
-            user: targetConfig.user,
-            password: targetConfig.password,
-            database: targetConfig.database
+            host: sourceConfig.host,
+            port: sourceConfig.port,
+            user: sourceConfig.user,
+            password: sourceConfig.password,
+            database: sourceConfig.database
         });
 
         // 检查 collections 表是否存在
         const [tableCheck] = await connection.query(
             "SELECT COUNT(*) as count FROM information_schema.tables WHERE table_schema = ? AND table_name = 'collections'",
-            [targetConfig.database]
+            [sourceConfig.database]
         );
 
         if (tableCheck[0].count === 0) {
@@ -65,7 +65,7 @@ async function getBusinessTables(targetConfig) {
         for (const tableName of tableNames) {
             const [check] = await connection.query(
                 "SELECT COUNT(*) as count FROM information_schema.tables WHERE table_schema = ? AND table_name = ?",
-                [targetConfig.database, tableName]
+                [sourceConfig.database, tableName]
             );
 
             if (check[0].count > 0) {
@@ -283,7 +283,7 @@ async function initConfig() {
         console.log(`   ✓ 已选择审批数据组合 (${excludeTables.length} 个表)`);
         excludeTables.forEach(t => console.log(`      - ${t}`));
     } else if (presetChoice === 'business') {
-        const businessTables = await getBusinessTables(targetAnswers);
+        const businessTables = await getBusinessTables(sourceAnswers);
         if (businessTables.length === 0) {
             console.log('   ⚠ 未找到业务表，将使用空列表');
         }
@@ -296,7 +296,7 @@ async function initConfig() {
         excludeTables = [...PRESET_TABLES.approval];
 
         // 再添加业务数据
-        const businessTables = await getBusinessTables(targetAnswers);
+        const businessTables = await getBusinessTables(sourceAnswers);
         if (businessTables.length > 0) {
             // 去重合并（避免重复表名）
             const uniqueBusinessTables = businessTables.filter(t => !excludeTables.includes(t));
