@@ -31,6 +31,7 @@ async function createConnection(config) {
             user: config.user,
             password: config.password,
             database: config.database,
+            charset: 'utf8mb4',  // 强制使用 utf8mb4 字符集
             supportBigNumbers: true,
             bigNumberStrings: true  // 将 BIGINT 作为字符串返回，避免精度丢失
         });
@@ -77,7 +78,9 @@ function generateSQLHeader(sourceConfig, targetConfig, excludeTables) {
     header += '--\n';
     header += '-- ============================================================\n';
     header += '\n';
-
+    // 添加MySQL兼容的字符集设置，防止乱码
+    header += 'SET NAMES utf8mb4;\n';
+    header += '/*!40101 SET NAMES utf8mb4 */;\n\n';
     return header;
 }
 
@@ -93,10 +96,14 @@ async function exportStructure(sourceConfig, targetConfig, excludeTables, output
             '-P', config.port.toString(),
             '-u', config.user,
             '--single-transaction',
+            '--skip-lock-tables',
+            '--skip-add-locks',
+            '--hex-blob',
             '--routines',
             '--triggers',
             '--events',
             '--complete-insert',
+            '--default-character-set=utf8mb4',
             config.database
         ];
 
@@ -117,21 +124,28 @@ async function exportStructure(sourceConfig, targetConfig, excludeTables, output
             excludeTables.forEach(table => {
                 dataArgs.push(`--ignore-table=${config.database}.${table}`);
             });
+            // 保证数据导出也加上字符集
+            structArgs.push('--default-character-set=utf8mb4');
+            dataArgs.push('--default-character-set=utf8mb4');
 
             // 先导出结构
             const dumpStructure = spawn('mysqldump', structArgs, { env });
             const dumpData = spawn('mysqldump', dataArgs, { env });
+
+            // 设置流编码为 utf8
+            dumpStructure.stdout.setEncoding('utf8');
+            dumpStructure.stderr.setEncoding('utf8');
 
             let structureOutput = '';
             let dataOutput = '';
             let errors = '';
 
             dumpStructure.stdout.on('data', (data) => {
-                structureOutput += data.toString();
+                structureOutput += data;
             });
 
             dumpStructure.stderr.on('data', (data) => {
-                errors += data.toString();
+                errors += data;
             });
 
             dumpStructure.on('close', (code) => {
@@ -141,12 +155,15 @@ async function exportStructure(sourceConfig, targetConfig, excludeTables, output
                 }
 
                 // 导出数据
+                dumpData.stdout.setEncoding('utf8');
+                dumpData.stderr.setEncoding('utf8');
+
                 dumpData.stdout.on('data', (data) => {
-                    dataOutput += data.toString();
+                    dataOutput += data;
                 });
 
                 dumpData.stderr.on('data', (data) => {
-                    errors += data.toString();
+                    errors += data;
                 });
 
                 dumpData.on('close', async (code) => {
@@ -180,15 +197,20 @@ async function exportStructure(sourceConfig, targetConfig, excludeTables, output
         } else {
             // 没有排除表，直接导出全部
             const dumpProcess = spawn('mysqldump', args, { env });
+
+            // 设置流编码为 utf8
+            dumpProcess.stdout.setEncoding('utf8');
+            dumpProcess.stderr.setEncoding('utf8');
+
             let output = '';
             let errors = '';
 
             dumpProcess.stdout.on('data', (data) => {
-                output += data.toString();
+                output += data;
             });
 
             dumpProcess.stderr.on('data', (data) => {
-                errors += data.toString();
+                errors += data;
             });
 
             dumpProcess.on('close', async (code) => {
@@ -233,9 +255,13 @@ async function exportTargetTablesData(targetConfig, tables, outputFile) {
             '-P', config.port.toString(),
             '-u', config.user,
             '--single-transaction',
+            '--skip-lock-tables',
+            '--skip-add-locks',
+            '--hex-blob',
             '--no-create-info',
             '--complete-insert',
             '--skip-triggers',
+            '--default-character-set=utf8mb4',
             config.database,
             ...tables
         ];
@@ -247,15 +273,20 @@ async function exportTargetTablesData(targetConfig, tables, outputFile) {
         }
 
         const dumpProcess = spawn('mysqldump', args, { env });
+
+        // 设置流编码为 utf8
+        dumpProcess.stdout.setEncoding('utf8');
+        dumpProcess.stderr.setEncoding('utf8');
+
         let output = '';
         let errors = '';
 
         dumpProcess.stdout.on('data', (data) => {
-            output += data.toString();
+            output += data;
         });
 
         dumpProcess.stderr.on('data', (data) => {
-            errors += data.toString();
+            errors += data;
         });
 
         dumpProcess.on('close', async (code) => {
