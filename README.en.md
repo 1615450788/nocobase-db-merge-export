@@ -13,10 +13,10 @@ A professional tool for exporting and merging data from two databases during Noc
 - **Deduplication Protection**: Automatically handles primary key conflicts using `REPLACE INTO`
 
 ### 📦 Preset Table Combinations
-- **Combination 1: Approval Data** (8 fixed tables) - Workflow and approval related
-- **Combination 2: Business Data** (dynamically fetched) - Auto-read from `collections` table
-- **Combination 3: All Data** (Combination 1+2) - Complete production environment data
-- **Custom Combination** - Manually specify any table list
+- **Combination 1: Approval Data** (8 fixed tables) - Workflow and approval related, **auto-includes many-to-many junction tables**
+- **Combination 2: Business Data** (dynamically fetched) - Auto-read from `collections` table, **auto-includes many-to-many junction tables**
+- **Combination 3: All Data** (Combination 1+2) - Complete production environment data, **auto-includes all many-to-many junction tables**
+- **Custom Combination** - Manually specify any table list, **auto-includes many-to-many junction tables**
 
 ### 🛡️ Data Safety Features
 - ✅ **BIGINT Precision Protection** - Prevents data corruption from large integer overflow
@@ -24,6 +24,8 @@ A professional tool for exporting and merging data from two databases during Noc
 - ✅ **Virtual Table Filtering** - Auto-skips NocoBase virtual tables
 - ✅ **Duplicate Table Deduplication** - Auto-detects and removes duplicate table names
 - ✅ **Transaction Support** - Uses `--single-transaction` to ensure data consistency
+- ✅ **Many-to-Many Junction Table Auto-Detection** - Automatically queries and includes m2m field junction tables for excluded tables
+- ✅ **DB_UNDERSCORED Support** - Auto-converts camelCase/snake_case table names to adapt different NocoBase configurations
 
 ### 🎯 User Experience
 - ✅ **Interactive Wizard** - Friendly Q&A-style configuration process
@@ -128,7 +130,8 @@ If you prefer manual editing, create `config.json` directly:
       "approvals",
       "workflow_stats"
     ],
-    "outputFile": "./merged_export.sql"
+    "outputFile": "./merged_export.sql",
+    "dbUnderscored": true
   }
 }
 ```
@@ -139,6 +142,10 @@ If you prefer manual editing, create `config.json` directly:
 - **target**: Target database configuration (provide excluded table data)
 - **export.excludeTables**: List of tables to fetch data from target database
 - **export.outputFile**: Output SQL file path
+- **export.dbUnderscored**: (Optional) NocoBase DB_UNDERSCORED configuration
+  - `true`: Enable underscore naming, auto-convert camelCase to snake_case (e.g., `userRoles` -> `user_roles`)
+  - `false`: Disable underscore naming, auto-convert snake_case to camelCase (e.g., `user_roles` -> `userRoles`)
+  - `undefined` or not set: Keep original table names, no conversion
 
 #### Preset Table Combinations
 
@@ -225,6 +232,13 @@ npm run export
 
 ```
 ┌─────────────────────────────────────────────────────────┐
+│ 0. Many-to-Many Junction Table Auto-Detection (NEW)     │
+│    ├─ Connect to Source database                        │
+│    ├─ Query fields table (interface = 'm2m')            │
+│    ├─ Parse options JSON to get 'through' attribute     │
+│    ├─ Add junction tables to excludeTables list         │
+│    └─ Auto-deduplication                                │
+├─────────────────────────────────────────────────────────┤
 │ 1. Source Database                                       │
 │    ├─ Export all table structures (--no-data)           │
 │    └─ Export non-excluded table data (--ignore-table)   │
@@ -245,7 +259,41 @@ npm run export
 
 ### Key Technical Points
 
-#### 1. BIGINT Precision Protection
+#### 1. Many-to-Many Junction Table Auto-Detection (NEW)
+```javascript
+// Query fields table for many-to-many fields
+SELECT f.collection_name, f.name, f.options
+FROM fields f
+WHERE f.collection_name IN ('users', 'roles', ...)  -- Excluded table list
+AND f.interface = 'm2m'
+AND f.options IS NOT NULL
+
+// Parse options JSON to get junction table name
+const options = JSON.parse(field.options);
+const junctionTable = options.through;  // e.g., 'user_roles'
+
+// Automatically add to exclusion list
+excludeTables.push(junctionTable);
+```
+
+#### 2. DB_UNDERSCORED Table Name Conversion (NEW)
+```javascript
+// CamelCase to snake_case
+function camelToSnake(str) {
+    return str.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
+}
+
+// snake_case to camelCase
+function snakeToCamel(str) {
+    return str.replace(/_([a-z])/g, (match, letter) => letter.toUpperCase());
+}
+
+// Examples
+userRoles -> user_roles   (dbUnderscored: true)
+user_roles -> userRoles   (dbUnderscored: false)
+```
+
+#### 3. BIGINT Precision Protection
 ```javascript
 // mysql2 configuration
 {
@@ -254,7 +302,7 @@ npm run export
 }
 ```
 
-#### 2. Column Matching Algorithm
+#### 4. Column Matching Algorithm
 ```javascript
 sourceColumns = ['id', 'name', 'status', 'old_field']
 targetColumns = ['id', 'name', 'status', 'new_field']
@@ -264,7 +312,7 @@ commonColumns = ['id', 'name', 'status']  // Take intersection
 SELECT `id`, `name`, `status` FROM target_table
 ```
 
-#### 3. Deduplication Strategy
+#### 5. Deduplication Strategy
 ```sql
 -- Clear table data
 DELETE FROM `excluded_table`;

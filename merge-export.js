@@ -11,6 +11,38 @@ const fs = require('fs').promises;
 const { spawn } = require('child_process');
 const path = require('path');
 
+// 驼峰命名转下划线命名
+function camelToSnake(str) {
+    return str.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
+}
+
+// 下划线命名转驼峰命名
+function snakeToCamel(str) {
+    return str.replace(/_([a-z])/g, (match, letter) => letter.toUpperCase());
+}
+
+// 根据 DB_UNDERSCORED 配置转换表名
+function convertTableName(tableName, dbUnderscored) {
+    if (!tableName) return tableName;
+
+    if (dbUnderscored === true) {
+        // 启用 DB_UNDERSCORED: 驼峰 -> 下划线
+        return camelToSnake(tableName);
+    } else if (dbUnderscored === false) {
+        // 禁用 DB_UNDERSCORED: 下划线 -> 驼峰
+        return snakeToCamel(tableName);
+    }
+
+    // 未配置或为 'auto'，保持原样
+    return tableName;
+}
+
+// 批量转换表名数组
+function convertTableNames(tableNames, dbUnderscored) {
+    if (!Array.isArray(tableNames)) return tableNames;
+    return tableNames.map(name => convertTableName(name, dbUnderscored));
+}
+
 // 读取配置文件
 async function loadConfig(configPath = './config.json') {
     try {
@@ -434,10 +466,92 @@ async function exportTableDataWithReplace(targetConfig, sourceConfig, tableName)
     }
 }
 
+// 获取排除表的多对多关联表（junction tables）
+async function getM2MJunctionTables(sourceConn, excludeTables, dbUnderscored) {
+    try {
+        console.log('\n🔍 查询多对多关联表...');
+
+        const junctionTables = [];
+
+        // 检查 fields 表是否存在
+        const [tableCheck] = await sourceConn.query(
+            "SELECT COUNT(*) as count FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'fields'",
+            []
+        );
+
+        if (tableCheck[0].count === 0) {
+            console.log('   ⚠ fields 表不存在，跳过多对多关联表查询');
+            return junctionTables;
+        }
+
+        // 查询排除表的多对多字段
+        // 注意: collections 表中存储的是原始表名（通常是驼峰命名）
+        const placeholders = excludeTables.map(() => '?').join(',');
+        const query = `
+            SELECT
+                f.collection_name,
+                f.name as field_name,
+                f.options
+            FROM fields f
+            WHERE f.collection_name IN (${placeholders})
+            AND f.interface = 'm2m'
+            AND f.options IS NOT NULL
+        `;
+
+        const [fields] = await sourceConn.query(query, excludeTables);
+
+        console.log(`   ✓ 找到 ${fields.length} 个多对多字段`);
+
+        // 解析 options JSON 获取 through 属性
+        for (const field of fields) {
+            try {
+                // options 是 longtext 类型，包含 JSON 字符串
+                const options = typeof field.options === 'string'
+                    ? JSON.parse(field.options)
+                    : field.options;
+
+                if (options && options.through) {
+                    // through 属性存储的是原始表名（驼峰命名）
+                    const throughTableName = options.through;
+
+                    // 根据 DB_UNDERSCORED 配置转换表名
+                    const convertedTableName = convertTableName(throughTableName, dbUnderscored);
+
+                    junctionTables.push(convertedTableName);
+
+                    if (dbUnderscored !== undefined) {
+                        console.log(`   ✓ ${field.collection_name}.${field.field_name} -> ${throughTableName} (转换为: ${convertedTableName})`);
+                    } else {
+                        console.log(`   ✓ ${field.collection_name}.${field.field_name} -> ${convertedTableName}`);
+                    }
+                }
+            } catch (error) {
+                console.log(`   ⚠ 解析字段 ${field.collection_name}.${field.field_name} 的 options 失败: ${error.message}`);
+            }
+        }
+
+        // 去重
+        const uniqueJunctionTables = [...new Set(junctionTables)];
+
+        if (uniqueJunctionTables.length > 0) {
+            console.log(`   ✓ 共找到 ${uniqueJunctionTables.length} 个唯一的多对多关联表:`);
+            uniqueJunctionTables.forEach(table => console.log(`      - ${table}`));
+        } else {
+            console.log('   ℹ 未找到多对多关联表');
+        }
+
+        return uniqueJunctionTables;
+
+    } catch (error) {
+        console.error(`   ✗ 查询多对多关联表失败: ${error.message}`);
+        return [];
+    }
+}
+
 // 合并导出的 SQL
 async function mergeExports(config) {
     const { source, target, export: exportConfig } = config;
-    let { excludeTables, outputFile } = exportConfig;
+    let { excludeTables, outputFile, dbUnderscored } = exportConfig;
 
     // 自动为输出文件添加时间戳（如果还没有）
     const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '_');
@@ -446,6 +560,28 @@ async function mergeExports(config) {
     if (!/\d{8}_\d{6}/.test(outputFile)) {
         // 在 .sql 前插入时间戳
         outputFile = outputFile.replace(/\.sql$/, `_${timestamp}.sql`);
+    }
+
+    // 根据 DB_UNDERSCORED 配置转换排除表名
+    if (dbUnderscored !== undefined) {
+        console.log(`\n📝 DB_UNDERSCORED 配置: ${dbUnderscored}`);
+        const originalTables = [...excludeTables];
+        excludeTables = convertTableNames(excludeTables, dbUnderscored);
+
+        // 显示转换信息
+        let hasConversion = false;
+        for (let i = 0; i < originalTables.length; i++) {
+            if (originalTables[i] !== excludeTables[i]) {
+                if (!hasConversion) {
+                    console.log('   表名转换:');
+                    hasConversion = true;
+                }
+                console.log(`   ${originalTables[i]} -> ${excludeTables[i]}`);
+            }
+        }
+        if (!hasConversion) {
+            console.log('   (无需转换)');
+        }
     }
 
     // 对排除表列表去重
@@ -459,6 +595,9 @@ async function mergeExports(config) {
     console.log(`Source 数据库: ${source.database}`);
     console.log(`Target 数据库: ${target.database}`);
     console.log(`输出文件: ${outputFile}`);
+    if (dbUnderscored !== undefined) {
+        console.log(`DB_UNDERSCORED: ${dbUnderscored ? '启用' : '禁用'}`);
+    }
     if (duplicateCount > 0) {
         console.log(`⚠ 检测到 ${duplicateCount} 个重复表名已自动去重`);
     }
@@ -468,6 +607,33 @@ async function mergeExports(config) {
     let targetConn = null;
 
     try {
+        // 步骤 0: 连接 source 数据库，获取多对多关联表
+        console.log(`\n[0/4] 连接 source 数据库，查询多对多关联表...`);
+        sourceConn = await createConnection(source);
+        console.log(`   ✓ 连接成功`);
+
+        // 获取排除表的多对多关联表
+        // 注意：需要传入原始表名（未转换的）来查询 collections 表
+        const originalExcludeTables = dbUnderscored !== undefined
+            ? convertTableNames(excludeTables, !dbUnderscored) // 反向转换回原始格式
+            : excludeTables;
+
+        const junctionTables = await getM2MJunctionTables(sourceConn, originalExcludeTables, dbUnderscored);
+
+        // 将关联表合并到 excludeTables 列表
+        if (junctionTables.length > 0) {
+            const beforeCount = excludeTables.length;
+            // 添加新的关联表（去重）
+            const newTables = junctionTables.filter(t => !excludeTables.includes(t));
+            excludeTables = [...excludeTables, ...newTables];
+            console.log(`\n   ✓ 已将 ${newTables.length} 个多对多关联表添加到排除列表`);
+            console.log(`   ✓ 排除表总数: ${beforeCount} -> ${excludeTables.length}`);
+        }
+
+        // 关闭 source 连接，稍后会重新连接
+        await sourceConn.end();
+        sourceConn = null;
+
         // 步骤 1: 导出 source 数据库结构和非排除表的数据
         await exportStructure(source, target, excludeTables, outputFile);
 
