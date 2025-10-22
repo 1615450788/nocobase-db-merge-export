@@ -23,7 +23,11 @@ const PRESET_TABLES = {
         'jobs',
         'executions',
         'approvals',
-        'workflow_stats'
+        'workflow_stats',
+        'environment_variables',
+        'authenticators',
+        'data_sources',
+        'notification_channels'
     ]
 };
 
@@ -331,9 +335,9 @@ async function initConfig() {
             name: 'presetChoice',
             message: '选择排除表组合（这些表的数据将从 Target 数据库获取）:',
             choices: [
-                { name: '组合1: 审批数据（工作流、审批相关表）', value: 'approval' },
+                { name: '组合1: 环境数据（工作流、变量、认证表等）', value: 'approval' },
                 { name: '组合2: 业务数据（从 collections 表获取）', value: 'business' },
-                { name: '组合3: 全部数据（审批数据 + 业务数据）', value: 'all' },
+                { name: '组合3: 全部数据（环境数据 + 业务数据）', value: 'all' },
                 { name: '自定义（手动输入）', value: 'custom' }
             ],
             default: 'approval'
