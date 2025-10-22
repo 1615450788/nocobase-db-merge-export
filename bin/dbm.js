@@ -27,7 +27,8 @@ const PRESET_TABLES = {
         'environment_variables',
         'authenticators',
         'data_sources',
-        'notification_channels'
+        'notification_channels',
+        "notification_send_logs"
     ]
 };
 

@@ -446,22 +446,24 @@ async function exportTargetTablesData(targetConfig, sourceConfig, tables, output
                 targetDataSQL += '\n';
 
             } else {
-                // 有列差异，需要创建临时视图
-                console.log(`      ⚠ 有列差异，创建临时视图导出`);
+                // 有列差异，使用 mysqldump --where 配合临时表
+                console.log(`      ⚠ 有列差异，使用临时表方式导出`);
 
-                const viewName = `_dbm_temp_view_${tableName}`;
+                const tempTableName = `_dbm_temp_${tableName}`;
                 const columnList = columnInfo.commonColumns.map(col => mysql.escapeId(col)).join(', ');
 
                 try {
-                    // 删除可能存在的旧视图
-                    await targetConn.query(`DROP VIEW IF EXISTS ${mysql.escapeId(viewName)}`);
+                    // 删除可能存在的旧临时表
+                    await targetConn.query(`DROP TABLE IF EXISTS ${mysql.escapeId(tempTableName)}`);
 
-                    // 创建临时视图（只包含共有列）
+                    // 创建临时表（只包含共有列的数据）
                     await targetConn.query(
-                        `CREATE VIEW ${mysql.escapeId(viewName)} AS SELECT ${columnList} FROM ${mysql.escapeId(tableName)}`
+                        `CREATE TABLE ${mysql.escapeId(tempTableName)} AS SELECT ${columnList} FROM ${mysql.escapeId(tableName)}`
                     );
 
-                    // 使用 mysqldump 导出视图数据
+                    console.log(`      ✓ 创建临时表成功`);
+
+                    // 使用 mysqldump 导出临时表数据
                     const dumpOutput = await new Promise((resolve, reject) => {
                         const args = [
                             '-h', targetConfig.host,
@@ -476,7 +478,7 @@ async function exportTargetTablesData(targetConfig, sourceConfig, tables, output
                             '--skip-triggers',
                             '--default-character-set=utf8mb4',
                             targetConfig.database,
-                            viewName
+                            tempTableName
                         ];
 
                         const env = { ...process.env };
@@ -513,9 +515,11 @@ async function exportTargetTablesData(targetConfig, sourceConfig, tables, output
                         });
                     });
 
-                    // 将视图名替换为实际表名
+                    console.log(`      ✓ mysqldump 导出成功`);
+
+                    // 将临时表名替换为实际表名
                     const processedOutput = dumpOutput.replace(
-                        new RegExp(`\`${viewName}\``, 'g'),
+                        new RegExp(`\`${tempTableName}\``, 'g'),
                         `\`${tableName}\``
                     );
 
@@ -525,11 +529,12 @@ async function exportTargetTablesData(targetConfig, sourceConfig, tables, output
                     targetDataSQL += '\n';
 
                 } finally {
-                    // 清理临时视图
+                    // 清理临时表
                     try {
-                        await targetConn.query(`DROP VIEW IF EXISTS ${mysql.escapeId(viewName)}`);
+                        await targetConn.query(`DROP TABLE IF EXISTS ${mysql.escapeId(tempTableName)}`);
+                        console.log(`      ✓ 清理临时表成功`);
                     } catch (e) {
-                        console.log(`      ⚠ 清理临时视图失败: ${e.message}`);
+                        console.log(`      ⚠ 清理临时表失败: ${e.message}`);
                     }
                 }
             }
