@@ -81,23 +81,18 @@ function generateSQLHeader(sourceConfig, targetConfig, excludeTables) {
 
     let header = '';
     header += '-- ============================================================\n';
-    header += '-- NocoBase Database Merge Export Tool\n';
+    header += '-- NocoBase Configuration Data Export Tool\n';
     header += '-- ============================================================\n';
     header += '--\n';
     header += `-- Export Time: ${timestamp}\n`;
     header += '--\n';
-    header += '-- SOURCE DATABASE (Structure + Most Data):\n';
+    header += '-- SOURCE DATABASE:\n';
     header += `--   Host:     ${sourceConfig.host}:${sourceConfig.port}\n`;
     header += `--   Database: ${sourceConfig.database}\n`;
     header += `--   User:     ${sourceConfig.user}\n`;
     header += '--\n';
-    header += '-- TARGET DATABASE (Data for Excluded Tables):\n';
-    header += `--   Host:     ${targetConfig.host}:${targetConfig.port}\n`;
-    header += `--   Database: ${targetConfig.database}\n`;
-    header += `--   User:     ${targetConfig.user}\n`;
-    header += '--\n';
     if (excludeTables && excludeTables.length > 0) {
-        header += '-- EXCLUDED TABLES (Data from TARGET):\n';
+        header += '-- EXCLUDED BUSINESS TABLES (Not Exported):\n';
         excludeTables.forEach(table => {
             header += `--   - ${table}\n`;
         });
@@ -106,23 +101,35 @@ function generateSQLHeader(sourceConfig, targetConfig, excludeTables) {
     }
     header += '--\n';
     header += '-- USAGE:\n';
-    header += '--   mysql -u username -p database_name < this_file.sql\n';
+    header += '--   mysql -u username -p target_database_name < this_file.sql\n';
     header += '--\n';
+    header += '-- WARNING: This script will TRUNCATE the configuration tables\n';
+    header += '--          before inserting the new data.\n';
     header += '-- ============================================================\n';
     header += '\n';
     // 添加MySQL兼容的字符集设置，防止乱码
     header += 'SET NAMES utf8mb4;\n';
-    header += '/*!40101 SET NAMES utf8mb4 */;\n\n';
+    header += '/*!40101 SET NAMES utf8mb4 */;\n';
+    header += 'SET FOREIGN_KEY_CHECKS=0;\n\n';
     return header;
 }
 
-// 使用 mysqldump 导出数据库结构（排除指定表的数据）
-async function exportStructure(sourceConfig, targetConfig, excludeTables, outputFile) {
+// 核心逻辑重构：只导出单库的配置数据，通过 TRUNCATE 来实现目标覆盖
+async function exportConfigurationData(sourceConfig, configTables, outputFile, header) {
     return new Promise((resolve, reject) => {
-        console.log(`\n[1/4] 从 source 数据库导出结构...`);
+        console.log(`\n[2/2] 从 source 数据库导出配置数据...`);
+        console.log(`   共将导出 ${configTables.length} 个配置表的数据`);
 
         const config = sourceConfig;
 
+        // 生成清空表的 SQL
+        let truncateSQL = '';
+        configTables.forEach(table => {
+            truncateSQL += `TRUNCATE TABLE \`${table}\`;\n`;
+        });
+        truncateSQL += '\n';
+
+        // mysqldump 参数：只导出数据，不带建结构，排除业务表，完整的 insert 语句
         const args = [
             '-h', config.host,
             '-P', config.port.toString(),
@@ -131,427 +138,100 @@ async function exportStructure(sourceConfig, targetConfig, excludeTables, output
             '--skip-lock-tables',
             '--skip-add-locks',
             '--hex-blob',
-            '--routines',
-            '--triggers',
-            '--events',
+            '--no-create-info',
             '--complete-insert',
+            '--skip-triggers',
             '--default-character-set=utf8mb4',
             config.database
         ];
 
-        // 使用环境变量传递密码（避免命令行参数中的特殊字符问题）
+        // 仅导出 configTables，为了避免命令行过长，我们通过获取完整的数据库数据，然后忽略掉其他的表
+        // 但对于大量表，更好的方式是只指定要导出的表。
+        // MySQL dump 支持将多个表名跟在数据库名后面: mysqldump db_name t1 t2 t3
+        const CHUNK_SIZE = 50; // 分批导出，避免命令行参数过长
         const env = { ...process.env };
         if (config.password) {
             env.MYSQL_PWD = config.password;
         }
 
-        // 排除指定表的数据（但保留结构）
-        if (excludeTables && excludeTables.length > 0) {
-            console.log(`   排除数据的表: ${excludeTables.join(', ')}`);
-            // 先导出所有表结构
-            const structArgs = [...args, '--no-data'];
+        // 先写入头部和 truncate 语句
+        const fs = require('fs');
+        try {
+            fs.writeFileSync(outputFile, header + truncateSQL, 'utf8');
+        } catch (err) {
+            return reject(new Error(`写入文件头部失败: ${err.message}`));
+        }
 
-            // 然后导出非排除表的数据
-            const dataArgs = [...args, '--no-create-info'];
-            excludeTables.forEach(table => {
-                dataArgs.push(`--ignore-table=${config.database}.${table}`);
-            });
-            // 保证数据导出也加上字符集
-            structArgs.push('--default-character-set=utf8mb4');
-            dataArgs.push('--default-character-set=utf8mb4');
-
-            // 先导出结构
-            const dumpStructure = spawn('mysqldump', structArgs, { env });
-            const dumpData = spawn('mysqldump', dataArgs, { env });
-
-            // 设置流编码为 utf8
-            dumpStructure.stdout.setEncoding('utf8');
-            dumpStructure.stderr.setEncoding('utf8');
-
-            let structureOutput = '';
-            let dataOutput = '';
-            let errors = '';
-
-            dumpStructure.stdout.on('data', (data) => {
-                structureOutput += data;
-            });
-
-            dumpStructure.stderr.on('data', (data) => {
-                errors += data;
-            });
-
-            dumpStructure.on('close', (code) => {
-                if (code !== 0) {
-                    reject(new Error(`mysqldump 导出结构失败: ${errors}`));
-                    return;
-                }
-
-                // 导出数据
-                dumpData.stdout.setEncoding('utf8');
-                dumpData.stderr.setEncoding('utf8');
-
-                dumpData.stdout.on('data', (data) => {
-                    dataOutput += data;
-                });
-
-                dumpData.stderr.on('data', (data) => {
+        // 分批导出表的函数
+        const exportBatch = (tables) => {
+            return new Promise((res, rej) => {
+                const batchArgs = [...args, ...tables];
+                const dumpProcess = spawn('mysqldump', batchArgs, { env });
+                
+                dumpProcess.stdout.setEncoding('utf8');
+                dumpProcess.stderr.setEncoding('utf8');
+                
+                let errors = '';
+                
+                // 使用流追加到文件，避免内存溢出
+                const writeStream = fs.createWriteStream(outputFile, { flags: 'a', encoding: 'utf8' });
+                dumpProcess.stdout.pipe(writeStream);
+                
+                dumpProcess.stderr.on('data', (data) => {
                     errors += data;
                 });
-
-                dumpData.on('close', async (code) => {
+                
+                dumpProcess.on('close', (code) => {
+                    writeStream.end();
                     if (code !== 0) {
-                        reject(new Error(`mysqldump 导出数据失败: ${errors}`));
-                        return;
-                    }
-
-                    try {
-                        // 生成头部注释
-                        const header = generateSQLHeader(sourceConfig, targetConfig, excludeTables);
-
-                        // 合并头部、结构和数据
-                        const combinedOutput = header + structureOutput + '\n' + dataOutput;
-                        await fs.writeFile(outputFile, combinedOutput, 'utf8');
-                        console.log(`   ✓ 结构导出完成`);
-                        resolve();
-                    } catch (error) {
-                        reject(error);
+                        rej(new Error(`mysqldump 失败: ${errors}`));
+                    } else {
+                        res();
                     }
                 });
-
-                dumpData.on('error', (error) => {
-                    reject(new Error(`执行 mysqldump 失败: ${error.message}`));
+                
+                dumpProcess.on('error', (err) => {
+                    writeStream.end();
+                    rej(new Error(`执行 mysqldump 失败: ${err.message}`));
                 });
             });
+        };
 
-            dumpStructure.on('error', (error) => {
-                reject(new Error(`执行 mysqldump 失败: ${error.message}`));
-            });
-        } else {
-            // 没有排除表，直接导出全部
-            const dumpProcess = spawn('mysqldump', args, { env });
-
-            // 设置流编码为 utf8
-            dumpProcess.stdout.setEncoding('utf8');
-            dumpProcess.stderr.setEncoding('utf8');
-
-            let output = '';
-            let errors = '';
-
-            dumpProcess.stdout.on('data', (data) => {
-                output += data;
-            });
-
-            dumpProcess.stderr.on('data', (data) => {
-                errors += data;
-            });
-
-            dumpProcess.on('close', async (code) => {
-                if (code !== 0) {
-                    reject(new Error(`mysqldump 失败: ${errors}`));
-                    return;
+        // 串行执行批次
+        const runBatches = async () => {
+            try {
+                for (let i = 0; i < configTables.length; i += CHUNK_SIZE) {
+                    const batch = configTables.slice(i, i + CHUNK_SIZE);
+                    console.log(`   导出批次: ${i + 1} - ${i + batch.length} / ${configTables.length}`);
+                    await exportBatch(batch);
                 }
+                
+                // 追加尾部
+                fs.appendFileSync(outputFile, '\nSET FOREIGN_KEY_CHECKS=1;\n', 'utf8');
+                resolve();
+            } catch (err) {
+                reject(err);
+            }
+        };
 
-                try {
-                    // 生成头部注释
-                    const header = generateSQLHeader(sourceConfig, targetConfig, excludeTables);
-
-                    // 合并头部和输出
-                    const finalOutput = header + output;
-                    await fs.writeFile(outputFile, finalOutput, 'utf8');
-                    console.log(`   ✓ 完整导出完成`);
-                    resolve();
-                } catch (error) {
-                    reject(error);
-                }
-            });
-
-            dumpProcess.on('error', (error) => {
-                reject(new Error(`执行 mysqldump 失败: ${error.message}`));
-            });
-        }
+        runBatches();
     });
 }
 
-// 获取两个数据库表的共有列
-async function getCommonColumns(sourceConn, targetConn, sourceDb, targetDb, tableName) {
-    // 获取 Source 表的列名
-    const [sourceColumns] = await sourceConn.query(
-        `SELECT COLUMN_NAME FROM information_schema.COLUMNS
-         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-         ORDER BY ORDINAL_POSITION`,
-        [sourceDb, tableName]
+// 获取所有基础表并过滤出配置表（完全忽略视图 VIEWs）
+async function getConfigTables(sourceConn, excludeTables) {
+    // 从 information_schema 过滤掉视图（VIEW），只获取真正的基础表（BASE TABLE）
+    const [rows] = await sourceConn.query(
+        `SELECT table_name 
+         FROM information_schema.tables 
+         WHERE table_schema = DATABASE() 
+         AND table_type = 'BASE TABLE'`
     );
-
-    const sourceColumnNames = sourceColumns.map(row => row.COLUMN_NAME);
-
-    // 获取 Target 表的列名
-    const [targetColumns] = await targetConn.query(
-        `SELECT COLUMN_NAME FROM information_schema.COLUMNS
-         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-         ORDER BY ORDINAL_POSITION`,
-        [targetDb, tableName]
-    );
-
-    const targetColumnNames = targetColumns.map(row => row.COLUMN_NAME);
-
-    // 取交集
-    const commonColumns = sourceColumnNames.filter(col => targetColumnNames.includes(col));
-    const sourceOnly = sourceColumnNames.filter(col => !targetColumnNames.includes(col));
-    const targetOnly = targetColumnNames.filter(col => !sourceColumnNames.includes(col));
-
-    return {
-        commonColumns,
-        sourceColumnNames,
-        targetColumnNames,
-        sourceOnly,
-        targetOnly
-    };
-}
-
-// 使用 mysqldump 从 target 数据库导出指定表的数据（支持列对比，只导出共有字段）
-async function exportTargetTablesData(targetConfig, sourceConfig, tables, outputFile) {
-    if (!tables || tables.length === 0) {
-        return;
-    }
-
-    let sourceConn = null;
-    let targetConn = null;
-
-    try {
-        // 连接数据库
-        sourceConn = await createConnection(sourceConfig);
-        targetConn = await createConnection(targetConfig);
-
-        // 添加注释头
-        let targetDataSQL = '\n\n';
-        targetDataSQL += '-- ' + '='.repeat(58) + '\n';
-        targetDataSQL += '-- Data from target database for excluded tables\n';
-        targetDataSQL += '-- Only common columns between source and target are exported\n';
-        targetDataSQL += '-- ' + '='.repeat(58) + '\n\n';
-
-        // 逐表处理
-        for (const tableName of tables) {
-            console.log(`   处理表: ${tableName}`);
-
-            // 获取列信息
-            const columnInfo = await getCommonColumns(
-                sourceConn,
-                targetConn,
-                sourceConfig.database,
-                targetConfig.database,
-                tableName
-            );
-
-            if (columnInfo.sourceColumnNames.length === 0) {
-                console.log(`      ⚠ 表 ${tableName} 在 source 中不存在，跳过`);
-                targetDataSQL += `-- Table ${tableName} not found in source database\n\n`;
-                continue;
-            }
-
-            if (columnInfo.targetColumnNames.length === 0) {
-                console.log(`      ⚠ 表 ${tableName} 在 target 中不存在，跳过`);
-                targetDataSQL += `-- Table ${tableName} not found in target database\n\n`;
-                continue;
-            }
-
-            if (columnInfo.commonColumns.length === 0) {
-                console.log(`      ⚠ 表 ${tableName} 没有公共列，跳过`);
-                targetDataSQL += `-- Table ${tableName} has no common columns\n\n`;
-                continue;
-            }
-
-            // 输出列差异信息
-            if (columnInfo.sourceOnly.length > 0 || columnInfo.targetOnly.length > 0) {
-                console.log(`      ⚠ 列差异：`);
-                if (columnInfo.sourceOnly.length > 0) {
-                    console.log(`        Source独有: ${columnInfo.sourceOnly.join(', ')}`);
-                }
-                if (columnInfo.targetOnly.length > 0) {
-                    console.log(`        Target独有: ${columnInfo.targetOnly.join(', ')}`);
-                }
-                console.log(`        公共列: ${columnInfo.commonColumns.length} 个`);
-            }
-
-            // 添加表注释
-            targetDataSQL += `--\n-- Dumping data for table \`${tableName}\`\n--\n`;
-            targetDataSQL += `-- Common columns: ${columnInfo.commonColumns.length} `;
-            targetDataSQL += `(Source: ${columnInfo.sourceColumnNames.length}, Target: ${columnInfo.targetColumnNames.length})\n`;
-
-            if (columnInfo.sourceOnly.length > 0) {
-                targetDataSQL += `-- Source-only columns (will use default/NULL): ${columnInfo.sourceOnly.join(', ')}\n`;
-            }
-            if (columnInfo.targetOnly.length > 0) {
-                targetDataSQL += `-- Target-only columns (ignored): ${columnInfo.targetOnly.join(', ')}\n`;
-            }
-            targetDataSQL += `--\n\n`;
-
-            // 如果没有列差异，直接用 mysqldump 导出
-            if (columnInfo.targetOnly.length === 0) {
-                console.log(`      ✓ 无列差异，使用 mysqldump 直接导出`);
-
-                const dumpOutput = await new Promise((resolve, reject) => {
-                    const args = [
-                        '-h', targetConfig.host,
-                        '-P', targetConfig.port.toString(),
-                        '-u', targetConfig.user,
-                        '--single-transaction',
-                        '--skip-lock-tables',
-                        '--skip-add-locks',
-                        '--hex-blob',
-                        '--no-create-info',
-                        '--complete-insert',
-                        '--skip-triggers',
-                        '--default-character-set=utf8mb4',
-                        targetConfig.database,
-                        tableName
-                    ];
-
-                    const env = { ...process.env };
-                    if (targetConfig.password) {
-                        env.MYSQL_PWD = targetConfig.password;
-                    }
-
-                    const dumpProcess = spawn('mysqldump', args, { env });
-
-                    dumpProcess.stdout.setEncoding('utf8');
-                    dumpProcess.stderr.setEncoding('utf8');
-
-                    let output = '';
-                    let errors = '';
-
-                    dumpProcess.stdout.on('data', (data) => {
-                        output += data;
-                    });
-
-                    dumpProcess.stderr.on('data', (data) => {
-                        errors += data;
-                    });
-
-                    dumpProcess.on('close', (code) => {
-                        if (code !== 0) {
-                            reject(new Error(`mysqldump failed: ${errors}`));
-                        } else {
-                            resolve(output);
-                        }
-                    });
-
-                    dumpProcess.on('error', (error) => {
-                        reject(new Error(`Failed to execute mysqldump: ${error.message}`));
-                    });
-                });
-
-                // 添加 DELETE 语句
-                targetDataSQL += `DELETE FROM \`${tableName}\`;\n`;
-                targetDataSQL += dumpOutput;
-                targetDataSQL += '\n';
-
-            } else {
-                // 有列差异，使用 mysqldump --where 配合临时表
-                console.log(`      ⚠ 有列差异，使用临时表方式导出`);
-
-                const tempTableName = `_dbm_temp_${tableName}`;
-                const columnList = columnInfo.commonColumns.map(col => mysql.escapeId(col)).join(', ');
-
-                try {
-                    // 删除可能存在的旧临时表
-                    await targetConn.query(`DROP TABLE IF EXISTS ${mysql.escapeId(tempTableName)}`);
-
-                    // 创建临时表（只包含共有列的数据）
-                    await targetConn.query(
-                        `CREATE TABLE ${mysql.escapeId(tempTableName)} AS SELECT ${columnList} FROM ${mysql.escapeId(tableName)}`
-                    );
-
-                    console.log(`      ✓ 创建临时表成功`);
-
-                    // 使用 mysqldump 导出临时表数据
-                    const dumpOutput = await new Promise((resolve, reject) => {
-                        const args = [
-                            '-h', targetConfig.host,
-                            '-P', targetConfig.port.toString(),
-                            '-u', targetConfig.user,
-                            '--single-transaction',
-                            '--skip-lock-tables',
-                            '--skip-add-locks',
-                            '--hex-blob',
-                            '--no-create-info',
-                            '--complete-insert',
-                            '--skip-triggers',
-                            '--default-character-set=utf8mb4',
-                            targetConfig.database,
-                            tempTableName
-                        ];
-
-                        const env = { ...process.env };
-                        if (targetConfig.password) {
-                            env.MYSQL_PWD = targetConfig.password;
-                        }
-
-                        const dumpProcess = spawn('mysqldump', args, { env });
-
-                        dumpProcess.stdout.setEncoding('utf8');
-                        dumpProcess.stderr.setEncoding('utf8');
-
-                        let output = '';
-                        let errors = '';
-
-                        dumpProcess.stdout.on('data', (data) => {
-                            output += data;
-                        });
-
-                        dumpProcess.stderr.on('data', (data) => {
-                            errors += data;
-                        });
-
-                        dumpProcess.on('close', (code) => {
-                            if (code !== 0) {
-                                reject(new Error(`mysqldump failed: ${errors}`));
-                            } else {
-                                resolve(output);
-                            }
-                        });
-
-                        dumpProcess.on('error', (error) => {
-                            reject(new Error(`Failed to execute mysqldump: ${error.message}`));
-                        });
-                    });
-
-                    console.log(`      ✓ mysqldump 导出成功`);
-
-                    // 将临时表名替换为实际表名
-                    const processedOutput = dumpOutput.replace(
-                        new RegExp(`\`${tempTableName}\``, 'g'),
-                        `\`${tableName}\``
-                    );
-
-                    // 添加 DELETE 语句
-                    targetDataSQL += `DELETE FROM \`${tableName}\`;\n`;
-                    targetDataSQL += processedOutput;
-                    targetDataSQL += '\n';
-
-                } finally {
-                    // 清理临时表
-                    try {
-                        await targetConn.query(`DROP TABLE IF EXISTS ${mysql.escapeId(tempTableName)}`);
-                        console.log(`      ✓ 清理临时表成功`);
-                    } catch (e) {
-                        console.log(`      ⚠ 清理临时表失败: ${e.message}`);
-                    }
-                }
-            }
-
-            console.log(`      ✓ 导出完成 (${columnInfo.commonColumns.length} 列)`);
-        }
-
-        // 追加到输出文件
-        await fs.appendFile(outputFile, targetDataSQL, 'utf8');
-
-    } catch (error) {
-        console.error(`\n✗ 导出排除表数据失败: ${error.message}`);
-        throw error;
-    } finally {
-        if (sourceConn) await sourceConn.end();
-        if (targetConn) await targetConn.end();
-    }
+    const allTables = rows.map(row => row.table_name);
+    
+    // 过滤掉排除的表
+    const configTables = allTables.filter(table => !excludeTables.includes(table));
+    return { allTables, configTables };
 }
 
 // 获取排除表的多对多关联表（junction tables）
@@ -638,7 +318,7 @@ async function getM2MJunctionTables(sourceConn, excludeTables, dbUnderscored) {
 
 // 合并导出的 SQL
 async function mergeExports(config) {
-    const { source, target, export: exportConfig } = config;
+    const { source, export: exportConfig } = config;
     let { excludeTables, outputFile, dbUnderscored } = exportConfig;
 
     // 自动为输出文件添加时间戳（如果还没有）
@@ -678,10 +358,9 @@ async function mergeExports(config) {
     const duplicateCount = originalCount - excludeTables.length;
 
     console.log('='.repeat(60));
-    console.log('NocoBase 数据库导出合并工具');
+    console.log('NocoBase 配置数据全量导出工具');
     console.log('='.repeat(60));
     console.log(`Source 数据库: ${source.database}`);
-    console.log(`Target 数据库: ${target.database}`);
     console.log(`输出文件: ${outputFile}`);
     if (dbUnderscored !== undefined) {
         console.log(`DB_UNDERSCORED: ${dbUnderscored ? '启用' : '禁用'}`);
@@ -692,11 +371,10 @@ async function mergeExports(config) {
     console.log('='.repeat(60));
 
     let sourceConn = null;
-    let targetConn = null;
 
     try {
         // 步骤 0: 连接 source 数据库，获取多对多关联表
-        console.log(`\n[0/4] 连接 source 数据库，查询多对多关联表...`);
+        console.log(`\n[0/2] 连接 source 数据库，查询多对多关联表...`);
         sourceConn = await createConnection(source);
         console.log(`   ✓ 连接成功`);
 
@@ -715,78 +393,29 @@ async function mergeExports(config) {
             const newTables = junctionTables.filter(t => !excludeTables.includes(t));
             excludeTables = [...excludeTables, ...newTables];
             console.log(`\n   ✓ 已将 ${newTables.length} 个多对多关联表添加到排除列表`);
-            console.log(`   ✓ 排除表总数: ${beforeCount} -> ${excludeTables.length}`);
+            console.log(`   ✓ 排除业务表总数: ${beforeCount} -> ${excludeTables.length}`);
         }
 
-        // 关闭 source 连接，稍后会重新连接
+        // 步骤 1: 获取所有的表，并过滤出配置表
+        console.log(`\n[1/2] 计算需要导出的配置表...`);
+        const { allTables, configTables } = await getConfigTables(sourceConn, excludeTables);
+        console.log(`   数据库总表数: ${allTables.length}`);
+        console.log(`   排除业务表数: ${excludeTables.length}`);
+        console.log(`   需要导出数据的配置表数: ${configTables.length}`);
+
+        // 关闭 source 连接
         await sourceConn.end();
         sourceConn = null;
 
-        // 步骤 1: 导出 source 数据库结构和非排除表的数据
-        await exportStructure(source, target, excludeTables, outputFile);
-
-        // 步骤 2: 连接 target 数据库
-        console.log(`\n[2/4] 连接 target 数据库...`);
-        targetConn = await createConnection(target);
-        console.log(`   ✓ 连接成功`);
-
-        // 步骤 3: 验证并过滤排除的表（只保留两个数据库都存在的表）
-        console.log(`\n[3/4] 验证并过滤 excludeTables...`);
-
-        // 连接 source 数据库
-        sourceConn = await createConnection(source);
-
-        const validTables = [];
-        const sourceOnlyTables = [];
-        const targetOnlyTables = [];
-
-        for (const table of excludeTables) {
-            // 检查表在 target 中是否存在
-            const [targetRows] = await targetConn.query(
-                'SELECT COUNT(*) as count FROM information_schema.tables WHERE table_schema = ? AND table_name = ?',
-                [target.database, table]
-            );
-
-            // 检查表在 source 中是否存在
-            const [sourceRows] = await sourceConn.query(
-                'SELECT COUNT(*) as count FROM information_schema.tables WHERE table_schema = ? AND table_name = ?',
-                [source.database, table]
-            );
-
-            const existsInTarget = targetRows[0].count > 0;
-            const existsInSource = sourceRows[0].count > 0;
-
-            if (existsInTarget && existsInSource) {
-                const [countRows] = await targetConn.query(`SELECT COUNT(*) as count FROM ${mysql.escapeId(table)}`);
-                console.log(`   ✓ 表 ${table} 在两个数据库都存在 (${countRows[0].count} 行)`);
-                validTables.push(table);
-            } else if (!existsInTarget) {
-                console.log(`   ⚠ 跳过表 ${table}: target 中不存在`);
-                targetOnlyTables.push(table);
-            } else if (!existsInSource) {
-                console.log(`   ⚠ 跳过表 ${table}: source 中不存在 (无法导入)`);
-                sourceOnlyTables.push(table);
-            }
+        if (configTables.length === 0) {
+            console.log(`   ⚠ 没有需要导出的配置表，任务结束。`);
+            return;
         }
 
-        if (validTables.length === 0) {
-            console.log(`   ⚠ 没有需要从 target 导出的表`);
-        }
-
-        // 更新 excludeTables 为只包含有效的表
-        excludeTables = validTables;
-
-        // 关闭之前的连接
-        await sourceConn.end();
-        await targetConn.end();
-        sourceConn = null;
-        targetConn = null;
-
-        // 步骤 4: 从 target 数据库导出排除表的数据
-        console.log(`\n[4/4] 从 target 数据库导出排除表的数据...`);
-
-        await exportTargetTablesData(target, source, excludeTables, outputFile);
-        console.log(`   ✓ 数据追加完成`);
+        // 步骤 2: 导出纯配置数据和覆盖脚本
+        const header = generateSQLHeader(source, null, excludeTables);
+        await exportConfigurationData(source, configTables, outputFile, header);
+        console.log(`   ✓ 配置数据导出并生成覆盖补丁完成`);
 
         // 显示文件信息
         const stats = await fs.stat(outputFile);
@@ -798,7 +427,7 @@ async function mergeExports(config) {
         console.log(`输出文件: ${outputFile}`);
         console.log(`文件大小: ${fileSizeInMB} MB`);
         console.log('\n使用方法:');
-        console.log(`  mysql -u username -p database_name < ${outputFile}`);
+        console.log(`  mysql -u username -p target_database_name < ${outputFile}`);
         console.log('='.repeat(60));
 
     } catch (error) {
@@ -808,7 +437,6 @@ async function mergeExports(config) {
     } finally {
         // 关闭数据库连接
         if (sourceConn) await sourceConn.end();
-        if (targetConn) await targetConn.end();
     }
 }
 

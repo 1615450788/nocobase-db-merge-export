@@ -159,8 +159,8 @@ async function getBusinessTables(sourceConfig, includeJunctionTables = true) {
 // 显示帮助信息
 function showHelp() {
     console.log(`
-DBM - Database Merge Export Tool
-用于 NocoBase 应用版本升级时的数据库导出合并工具
+DBM - Database Configuration Data Export Tool
+用于 NocoBase 应用版本升级时的单库配置数据导出与覆盖补丁生成工具
 
 用法:
   dbm [配置文件]                    使用指定配置文件导出
@@ -181,18 +181,11 @@ DBM - Database Merge Export Tool
       "port": 3306,
       "user": "root",
       "password": "password",
-      "database": "source_db"
-    },
-    "target": {
-      "host": "127.0.0.1",
-      "port": 3306,
-      "user": "root",
-      "password": "password",
-      "database": "target_db"
+      "database": "database_name"
     },
     "export": {
       "excludeTables": ["users", "roles"],
-      "outputFile": "./merged_export.sql"
+      "outputFile": "./config_export.sql"
     }
   }
 `);
@@ -226,105 +219,40 @@ async function initConfig() {
 
     console.log('\n🔧 配置数据库导出工具\n');
 
-    // Source 数据库配置
-    console.log('📦 Source 数据库配置（导出结构和大部分数据）:\n');
+    // 数据库配置
+    console.log('📦 数据库配置（仅导出该库的纯配置数据）:\n');
     const sourceAnswers = await inquirer.prompt([
         {
             type: 'input',
             name: 'host',
-            message: 'Source 数据库主机:',
+            message: '数据库主机:',
             default: '127.0.0.1'
         },
         {
             type: 'number',
             name: 'port',
-            message: 'Source 数据库端口:',
+            message: '数据库端口:',
             default: 3306
         },
         {
             type: 'input',
             name: 'user',
-            message: 'Source 数据库用户名:',
+            message: '数据库用户名:',
             default: 'root'
         },
         {
             type: 'password',
             name: 'password',
-            message: 'Source 数据库密码:',
+            message: '数据库密码:',
             mask: '*'
         },
         {
             type: 'input',
             name: 'database',
-            message: 'Source 数据库名:',
+            message: '数据库名:',
             validate: (input) => input.trim() !== '' || '数据库名不能为空'
         }
     ]);
-
-    // Target 数据库配置
-    console.log('\n📦 Target 数据库配置（提供排除表的数据）:\n');
-
-    const { sameAsSource } = await inquirer.prompt([
-        {
-            type: 'confirm',
-            name: 'sameAsSource',
-            message: 'Target 数据库连接信息是否与 Source 相同？',
-            default: false
-        }
-    ]);
-
-    let targetAnswers;
-    if (sameAsSource) {
-        const { targetDatabase } = await inquirer.prompt([
-            {
-                type: 'input',
-                name: 'targetDatabase',
-                message: 'Target 数据库名:',
-                validate: (input) => input.trim() !== '' || '数据库名不能为空'
-            }
-        ]);
-
-        targetAnswers = {
-            host: sourceAnswers.host,
-            port: sourceAnswers.port,
-            user: sourceAnswers.user,
-            password: sourceAnswers.password,
-            database: targetDatabase
-        };
-    } else {
-        targetAnswers = await inquirer.prompt([
-            {
-                type: 'input',
-                name: 'host',
-                message: 'Target 数据库主机:',
-                default: '127.0.0.1'
-            },
-            {
-                type: 'number',
-                name: 'port',
-                message: 'Target 数据库端口:',
-                default: 3306
-            },
-            {
-                type: 'input',
-                name: 'user',
-                message: 'Target 数据库用户名:',
-                default: 'root'
-            },
-            {
-                type: 'password',
-                name: 'password',
-                message: 'Target 数据库密码:',
-                mask: '*'
-            },
-            {
-                type: 'input',
-                name: 'database',
-                message: 'Target 数据库名:',
-                validate: (input) => input.trim() !== '' || '数据库名不能为空'
-            }
-        ]);
-    }
 
     // 导出配置
     console.log('\n⚙️  导出配置:\n');
@@ -334,11 +262,11 @@ async function initConfig() {
         {
             type: 'list',
             name: 'presetChoice',
-            message: '选择排除表组合（这些表的数据将从 Target 数据库获取）:',
+            message: '选择业务表组合（这些表的数据将不被导出）:',
             choices: [
-                { name: '组合1: 环境数据（工作流、变量、认证表等）', value: 'approval' },
-                { name: '组合2: 业务数据（从 collections 表获取）', value: 'business' },
-                { name: '组合3: 全部数据（环境数据 + 业务数据）', value: 'all' },
+                { name: '组合1: 环境数据（工作流、变量、认证表等业务表）', value: 'approval' },
+                { name: '组合2: 业务数据（从 collections 表获取的所有业务表）', value: 'business' },
+                { name: '组合3: 全部业务数据（组合1 + 组合2）', value: 'all' },
                 { name: '自定义（手动输入）', value: 'custom' }
             ],
             default: 'approval'
@@ -436,7 +364,7 @@ async function initConfig() {
             {
                 type: 'input',
                 name: 'customTables',
-                message: '排除的表（从 Target 获取数据），用逗号分隔:',
+                message: '业务表名单（这些表的数据将被排除），用逗号分隔:',
                 default: 'workflow_cc_tasks,user_workflow_tasks,approval_records,approval_executions,jobs,executions,approvals,workflow_stats',
                 filter: (input) => {
                     return input.split(',').map(t => t.trim()).filter(t => t);
@@ -473,7 +401,6 @@ async function initConfig() {
     // 生成配置对象
     const config = {
         source: sourceAnswers,
-        target: targetAnswers,
         export: {
             excludeTables: excludeTables,
             outputFile: outputFile,
@@ -486,8 +413,7 @@ async function initConfig() {
 
     console.log('\n✓ 配置文件已生成: config.json');
     console.log('\n配置摘要:');
-    console.log(`  Source: ${sourceAnswers.user}@${sourceAnswers.host}:${sourceAnswers.port}/${sourceAnswers.database}`);
-    console.log(`  Target: ${targetAnswers.user}@${targetAnswers.host}:${targetAnswers.port}/${targetAnswers.database}`);
+    console.log(`  数据库: ${sourceAnswers.user}@${sourceAnswers.host}:${sourceAnswers.port}/${sourceAnswers.database}`);
     console.log(`  排除表数量: ${excludeTables.length} 个`);
     if (excludeTables.length <= 10) {
         console.log(`  排除表: ${excludeTables.join(', ')}`);

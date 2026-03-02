@@ -1,7 +1,7 @@
 {
   "name": "nocobase-db-merge-export",
   "version": "1.1.2",
-  "description": "NocoBase database merge export tool for version upgrades - exports structure and merges data from two databases. NocoBase数据库导出合并工具，用于版本升级时导出结构并合并数据",
+  "description": "NocoBase database configuration data export tool - exports pure configuration data to safely overwrite target databases. NocoBase 数据库配置数据导出工具，用于提取并覆盖目标数据库的纯配置数据",
   "main": "merge-export.js",
   "bin": {
     "dbm": "./bin/dbm.js"
