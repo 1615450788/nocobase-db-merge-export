@@ -43,6 +43,23 @@ function convertTableNames(tableNames, dbUnderscored) {
     return tableNames.map(name => convertTableName(name, dbUnderscored));
 }
 
+// 预设环境数据表（approval定义的环境数据表）
+const PRESET_ENV_TABLES = [
+    'workflow_cc_tasks',
+    'user_workflow_tasks',
+    'approval_records',
+    'approval_executions',
+    'jobs',
+    'executions',
+    'approvals',
+    'workflow_stats',
+    'environment_variables',
+    'authenticators',
+    'data_sources',
+    'notification_channels',
+    'notification_send_logs'
+];
+
 // 读取配置文件
 async function loadConfig(configPath = './config.json') {
     try {
@@ -330,29 +347,7 @@ async function mergeExports(config) {
         outputFile = outputFile.replace(/\.sql$/, `_${timestamp}.sql`);
     }
 
-    // 根据 DB_UNDERSCORED 配置转换排除表名
-    if (dbUnderscored !== undefined) {
-        console.log(`\n📝 DB_UNDERSCORED 配置: ${dbUnderscored}`);
-        const originalTables = [...excludeTables];
-        excludeTables = convertTableNames(excludeTables, dbUnderscored);
-
-        // 显示转换信息
-        let hasConversion = false;
-        for (let i = 0; i < originalTables.length; i++) {
-            if (originalTables[i] !== excludeTables[i]) {
-                if (!hasConversion) {
-                    console.log('   表名转换:');
-                    hasConversion = true;
-                }
-                console.log(`   ${originalTables[i]} -> ${excludeTables[i]}`);
-            }
-        }
-        if (!hasConversion) {
-            console.log('   (无需转换)');
-        }
-    }
-
-    // 对排除表列表去重
+    // 对排除表列表去重（初始去重，如果是从配置读取的）
     const originalCount = excludeTables.length;
     excludeTables = [...new Set(excludeTables)];
     const duplicateCount = originalCount - excludeTables.length;
@@ -377,6 +372,53 @@ async function mergeExports(config) {
         console.log(`\n[0/2] 连接 source 数据库，查询多对多关联表...`);
         sourceConn = await createConnection(source);
         console.log(`   ✓ 连接成功`);
+
+        // 动态获取业务表（如果排除表列表为空）
+        if (excludeTables.length === 0) {
+            console.log(`\n📋 排除表列表为空，自动从 collections 表动态获取业务表...`);
+            const dynamicTables = await getDynamicBusinessTables(sourceConn, source, dbUnderscored);
+
+            // 合并预设的环境数据表（approval定义的环境数据）
+            const allTables = [...new Set([...dynamicTables, ...PRESET_ENV_TABLES])];
+
+            if (allTables.length > 0) {
+                excludeTables = allTables;
+                const presetCount = PRESET_ENV_TABLES.length;
+                const dynamicCount = dynamicTables.length;
+                const totalCount = excludeTables.length;
+                console.log(`   ✓ 已动态获取 ${dynamicCount} 个业务表 + ${presetCount} 个预设环境数据表 = ${totalCount} 个排除表`);
+
+                // 显示预设表信息
+                if (presetCount > 0) {
+                    console.log(`   📋 预设环境数据表:`);
+                    PRESET_ENV_TABLES.forEach(table => console.log(`      - ${table}`));
+                }
+            } else {
+                console.log(`   ⚠ 未找到业务表，将继续导出所有表（无排除）`);
+            }
+        }
+
+        // 根据 DB_UNDERSCORED 配置转换排除表名（如果动态获取的表名需要转换）
+        if (dbUnderscored !== undefined && excludeTables.length > 0) {
+            console.log(`\n📝 DB_UNDERSCORED 配置: ${dbUnderscored}`);
+            const originalTables = [...excludeTables];
+            excludeTables = convertTableNames(excludeTables, dbUnderscored);
+
+            // 显示转换信息
+            let hasConversion = false;
+            for (let i = 0; i < originalTables.length; i++) {
+                if (originalTables[i] !== excludeTables[i]) {
+                    if (!hasConversion) {
+                        console.log('   表名转换:');
+                        hasConversion = true;
+                    }
+                    console.log(`   ${originalTables[i]} -> ${excludeTables[i]}`);
+                }
+            }
+            if (!hasConversion) {
+                console.log('   (无需转换)');
+            }
+        }
 
         // 获取排除表的多对多关联表
         // 注意：需要传入原始表名（未转换的）来查询 collections 表
@@ -440,6 +482,52 @@ async function mergeExports(config) {
     }
 }
 
+// 从 Source 数据库动态获取业务数据表（从 collections 表）
+async function getDynamicBusinessTables(connection, sourceConfig, dbUnderscored) {
+    try {
+        console.log('\n🔍 正在从 collections 表动态获取业务表列表...');
+
+        // 检查 collections 表是否存在
+        const [tableCheck] = await connection.query(
+            "SELECT COUNT(*) as count FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'collections'",
+            []
+        );
+
+        if (tableCheck[0].count === 0) {
+            console.log('   ⚠ collections 表不存在，无法动态获取业务表列表');
+            return [];
+        }
+
+        // 从 collections 表获取表名
+        const [rows] = await connection.query(
+            "SELECT name FROM collections WHERE name IS NOT NULL AND name != ''"
+        );
+
+        const tableNames = rows.map(row => row.name);
+        console.log(`   ✓ 找到 ${tableNames.length} 个业务表`);
+
+        // 验证这些表在数据库中是否真实存在（过滤虚拟表）
+        const validTables = [];
+        for (const tableName of tableNames) {
+            const [check] = await connection.query(
+                "SELECT COUNT(*) as count FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?",
+                [tableName]
+            );
+
+            if (check[0].count > 0) {
+                validTables.push(tableName);
+            }
+        }
+
+        console.log(`   ✓ 验证后有效表数量: ${validTables.length} 个`);
+        return validTables;
+
+    } catch (error) {
+        console.error(`   ✗ 动态获取业务表失败: ${error.message}`);
+        return [];
+    }
+}
+
 // 主函数
 async function main() {
     const configPath = process.argv[2] || './config.json';
@@ -450,8 +538,19 @@ async function main() {
     await mergeExports(config);
 }
 
-// 运行主函数
-main().catch(error => {
-    console.error('程序异常:', error);
-    process.exit(1);
-});
+// 导出函数供其他模块调用
+module.exports = {
+    mergeExports,
+    loadConfig,
+    createConnection,
+    getConfigTables,
+    getM2MJunctionTables
+};
+
+// 如果直接运行此文件，则执行主函数
+if (require.main === module) {
+    main().catch(error => {
+        console.error('程序异常:', error);
+        process.exit(1);
+    });
+}

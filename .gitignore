@@ -10,6 +10,7 @@ merged_export.sql
 
 # Configuration files (may contain sensitive credentials)
 config.json
+.env
 
 # IDE
 .vscode/
